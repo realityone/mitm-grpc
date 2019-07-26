@@ -18,30 +18,6 @@ import (
 	"google.golang.org/grpc/resolver"
 )
 
-// Context is
-type Context struct {
-	context.Context
-
-	srv           interface{}
-	serverStream  grpc.ServerStream
-	serviceMethod string
-}
-
-// Srv is
-func (ctx *Context) Srv() interface{} {
-	return ctx.srv
-}
-
-// ServerStream is
-func (ctx *Context) ServerStream() grpc.ServerStream {
-	return ctx.serverStream
-}
-
-// ServiceMethod is
-func (ctx *Context) ServiceMethod() string {
-	return ctx.serviceMethod
-}
-
 type clientSet struct {
 	cc  *grpc.ClientConn
 	rcc *grpcreflect.Client
@@ -101,6 +77,40 @@ func resolveInOutMessage(rcc *grpcreflect.Client, serviceName string, methodName
 	return &dummyMessage{}, &dummyMessage{}, nil
 }
 
+func (s *Server) client(ctx *Context, service string) (*clientSet, error) {
+	s.clientLock.RLock()
+	cli, ok := s.clients[service]
+	s.clientLock.RUnlock()
+	if ok {
+		return cli, nil
+	}
+
+	md, _ := metadata.FromIncomingContext(ctx)
+	target, ok := targetFromMetadata(md)
+	if !ok {
+		target = fmt.Sprintf("mitm-proxy://%s/", service)
+	}
+
+	newCC, err := grpc.DialContext(ctx, target, grpc.WithBlock(), grpc.WithInsecure())
+	if err != nil {
+		return nil, err
+	}
+	s.clientLock.Lock()
+	defer s.clientLock.Unlock()
+	cli, ok = s.clients[service]
+	if ok {
+		logrus.Debugf("Already has established connection for %q", service)
+		newCC.Close()
+		return cli, nil
+	}
+	newCliSet := &clientSet{
+		cc:  newCC,
+		rcc: grpcreflect.NewClient(context.Background(), rpb.NewServerReflectionClient(newCC)),
+	}
+	s.clients[service] = newCliSet
+	return newCliSet, nil
+}
+
 // Handler is
 func (s *Server) Handler(ctx *Context) error {
 	service, method, err := splitServiceMethod(ctx.ServiceMethod())
@@ -114,40 +124,7 @@ func (s *Server) Handler(ctx *Context) error {
 		logrus.Infof("In coming metadata: %+v", md)
 	}
 
-	client := func() (*clientSet, error) {
-		s.clientLock.RLock()
-		cli, ok := s.clients[service]
-		s.clientLock.RUnlock()
-		if ok {
-			return cli, nil
-		}
-
-		target, ok := targetFromMetadata(md)
-		if !ok {
-			target = fmt.Sprintf("mitm-proxy://%s/", service)
-		}
-
-		newCC, err := grpc.DialContext(ctx, target, grpc.WithBlock(), grpc.WithInsecure())
-		if err != nil {
-			return nil, err
-		}
-		s.clientLock.Lock()
-		defer s.clientLock.Unlock()
-		cli, ok = s.clients[service]
-		if ok {
-			logrus.Debugf("Already has established connection for %q", service)
-			newCC.Close()
-			return cli, nil
-		}
-		newCliSet := &clientSet{
-			cc:  newCC,
-			rcc: grpcreflect.NewClient(context.Background(), rpb.NewServerReflectionClient(newCC)),
-		}
-		s.clients[service] = newCliSet
-		return newCliSet, nil
-	}
-
-	cli, err := client()
+	cli, err := s.client(ctx, service)
 	if err != nil {
 		return err
 	}
