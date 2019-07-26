@@ -8,6 +8,8 @@ import (
 )
 
 func main() {
+	logrus.SetLevel(logrus.DebugLevel)
+
 	lis, err := net.Listen("tcp", "0.0.0.0:9000")
 	if err != nil {
 		panic(err)

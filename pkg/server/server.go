@@ -1,25 +1,58 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"strings"
 	"sync"
 
+	"github.com/golang/protobuf/proto"
+	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	rpb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 	"google.golang.org/grpc/resolver"
 )
+
+// Context is
+type Context struct {
+	context.Context
+
+	srv           interface{}
+	serverStream  grpc.ServerStream
+	serviceMethod string
+}
+
+// Srv is
+func (ctx *Context) Srv() interface{} {
+	return ctx.srv
+}
+
+// ServerStream is
+func (ctx *Context) ServerStream() grpc.ServerStream {
+	return ctx.serverStream
+}
+
+// ServiceMethod is
+func (ctx *Context) ServiceMethod() string {
+	return ctx.serviceMethod
+}
+
+type clientSet struct {
+	cc  *grpc.ClientConn
+	rcc *grpcreflect.Client
+}
 
 // Server is
 type Server struct {
 	*grpc.Server
 
 	clientLock sync.RWMutex
-	clients    map[string]*grpc.ClientConn
+	clients    map[string]*clientSet
 }
 
 type dummyMessage struct {
@@ -35,31 +68,58 @@ func (dm *dummyMessage) Unmarshal(in []byte) error {
 	return nil
 }
 
+func resolveInOutMessage(rcc *grpcreflect.Client, serviceName string, methodName string) (proto.Message, proto.Message, error) {
+	type resolver func() (proto.Message, proto.Message, error)
+
+	byReflect := func() (proto.Message, proto.Message, error) {
+		serviceDesc, err := rcc.ResolveService(serviceName)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, method := range serviceDesc.GetMethods() {
+			if method.GetName() != methodName {
+				continue
+			}
+			input := method.GetInputType()
+			output := method.GetOutputType()
+			return proto.Clone(input.AsProto()), proto.Clone(output.AsProto()), nil
+		}
+		return nil, nil, errors.Errorf("service %q method %q not found by reflect server", serviceName, methodName)
+	}
+	byLocalProto := func() (proto.Message, proto.Message, error) {
+		return nil, nil, errors.New("unimplement")
+	}
+
+	for _, resolv := range []resolver{byReflect, byLocalProto} {
+		in, out, err := resolv()
+		if err != nil {
+			logrus.Debugf("Failed to resolve method in out message: %+v", err)
+			continue
+		}
+		return in, out, nil
+	}
+	return &dummyMessage{}, &dummyMessage{}, nil
+}
+
 // Handler is
-func (s *Server) Handler(srv interface{}, stream grpc.ServerStream) error {
-	serviceMethod, _ := grpc.MethodFromServerStream(stream) // already checked
-	service, method, err := splitServiceMethod(serviceMethod)
+func (s *Server) Handler(ctx *Context) error {
+	service, method, err := splitServiceMethod(ctx.ServiceMethod())
 	if err != nil {
 		return grpc.Errorf(codes.FailedPrecondition, err.Error())
 	}
 
 	logrus.Infof("Handler: service: %+v: method: %+v", service, method)
-	ctx := stream.Context()
 	md, ok := metadata.FromIncomingContext(ctx)
 	if ok {
 		logrus.Infof("In coming metadata: %+v", md)
 	}
-	req := &dummyMessage{}
-	if err := stream.RecvMsg(req); err != nil {
-		return err
-	}
 
-	conn := func() (*grpc.ClientConn, error) {
+	client := func() (*clientSet, error) {
 		s.clientLock.RLock()
-		cc, ok := s.clients[service]
+		cli, ok := s.clients[service]
 		s.clientLock.RUnlock()
 		if ok {
-			return cc, nil
+			return cli, nil
 		}
 
 		target, ok := targetFromMetadata(md)
@@ -73,22 +133,35 @@ func (s *Server) Handler(srv interface{}, stream grpc.ServerStream) error {
 		}
 		s.clientLock.Lock()
 		defer s.clientLock.Unlock()
-		cc, ok = s.clients[service]
+		cli, ok = s.clients[service]
 		if ok {
 			logrus.Debugf("Already has established connection for %q", service)
 			newCC.Close()
-			return cc, nil
+			return cli, nil
 		}
-		s.clients[service] = newCC
-		return newCC, nil
+		newCliSet := &clientSet{
+			cc:  newCC,
+			rcc: grpcreflect.NewClient(context.Background(), rpb.NewServerReflectionClient(newCC)),
+		}
+		s.clients[service] = newCliSet
+		return newCliSet, nil
 	}
 
-	cc, err := conn()
+	cli, err := client()
 	if err != nil {
 		return err
 	}
-	reply := &dummyMessage{}
-	if err := cc.Invoke(ctx, serviceMethod, req, reply); err != nil {
+
+	req, reply, err := resolveInOutMessage(cli.rcc, service, method)
+	if err != nil {
+		return err
+	}
+
+	stream := ctx.ServerStream()
+	if err := stream.RecvMsg(req); err != nil {
+		return err
+	}
+	if err := cli.cc.Invoke(ctx, ctx.ServiceMethod(), req, reply); err != nil {
 		return err
 	}
 	if err := stream.SendHeader(md); err != nil {
@@ -101,13 +174,19 @@ func (s *Server) Handler(srv interface{}, stream grpc.ServerStream) error {
 	return nil
 }
 
-func wrapped(handler grpc.StreamHandler) grpc.StreamHandler {
+func wrapped(handler func(*Context) error) grpc.StreamHandler {
 	return func(srv interface{}, stream grpc.ServerStream) error {
 		serviceMethod, ok := grpc.MethodFromServerStream(stream)
 		if !ok {
 			return grpc.Errorf(codes.Internal, "failed to get method from stream")
 		}
-		if err := handler(srv, stream); err != nil {
+		ctx := &Context{
+			Context:       stream.Context(),
+			srv:           srv,
+			serverStream:  stream,
+			serviceMethod: serviceMethod,
+		}
+		if err := handler(ctx); err != nil {
 			logrus.Errorf("Failed to handle request stream: method: %q: %+v", serviceMethod, err)
 			return err
 		}
@@ -117,9 +196,8 @@ func wrapped(handler grpc.StreamHandler) grpc.StreamHandler {
 
 // NewServer is
 func NewServer(resolver resolver.Resolver) *Server {
-
 	server := &Server{
-		clients: map[string]*grpc.ClientConn{},
+		clients: map[string]*clientSet{},
 	}
 	server.Server = grpc.NewServer(
 		grpc.UnknownServiceHandler(wrapped(server.Handler)),
