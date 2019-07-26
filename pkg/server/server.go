@@ -50,7 +50,7 @@ func resolveInOutMessage(rcc *grpcreflect.Client, serviceName string, methodName
 	byReflect := func() (proto.Message, proto.Message, error) {
 		serviceDesc, err := rcc.ResolveService(serviceName)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, errors.WithStack(err)
 		}
 		for _, method := range serviceDesc.GetMethods() {
 			if method.GetName() != methodName {
@@ -196,7 +196,7 @@ func splitServiceMethod(serviceMethod string) (string, string, error) {
 }
 
 func targetFromMetadata(md metadata.MD) (string, bool) {
-	target := md["x-mitm-target"]
+	target := md.Get("x-mitm-target")
 	if len(target) <= 0 {
 		return "", false
 	}
