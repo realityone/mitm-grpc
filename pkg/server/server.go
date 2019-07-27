@@ -37,7 +37,7 @@ type dummyMessage struct {
 }
 
 func (dm *dummyMessage) Reset()                   { dm.payload = dm.payload[:0] }
-func (dm *dummyMessage) String() string           { return fmt.Sprintf("%+v", dm.payload) }
+func (dm *dummyMessage) String() string           { return fmt.Sprintf("%q", dm.payload) }
 func (dm *dummyMessage) ProtoMessage()            {}
 func (dm *dummyMessage) Marshal() ([]byte, error) { return dm.payload, nil }
 func (dm *dummyMessage) Unmarshal(in []byte) error {
