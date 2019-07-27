@@ -9,12 +9,12 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 	pb "google.golang.org/grpc/reflection/grpc_testingv3"
 )
 
 // Service is
-type Service struct {
-}
+type Service struct{}
 
 // Search is
 func (s *Service) Search(ctx context.Context, req *pb.SearchRequestV3) (*pb.SearchResponseV3, error) {
@@ -88,5 +88,6 @@ func main() {
 
 	server := grpc.NewServer()
 	pb.RegisterSearchServiceV3Server(server, &Service{})
+	reflection.Register(server)
 	logrus.Fatal(server.Serve(lis))
 }
