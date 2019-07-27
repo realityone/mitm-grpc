@@ -10,7 +10,7 @@ import (
 	pb "google.golang.org/grpc/reflection/grpc_testingv3"
 )
 
-const proxy = "127.0.0.1:9000"
+const proxy = "192.168.10.165:9000"
 
 func newClient() pb.SearchServiceV3Client {
 	cc, err := grpc.Dial(proxy, grpc.WithInsecure())
