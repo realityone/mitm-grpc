@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/jhump/protoreflect/dynamic"
 	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -56,9 +57,9 @@ func resolveInOutMessage(rcc *grpcreflect.Client, serviceName string, methodName
 			if method.GetName() != methodName {
 				continue
 			}
-			input := method.GetInputType()
-			output := method.GetOutputType()
-			return proto.Clone(input.AsProto()), proto.Clone(output.AsProto()), nil
+			tInput := method.GetInputType()
+			tOutput := method.GetOutputType()
+			return dynamic.NewMessage(tInput), dynamic.NewMessage(tOutput), nil
 		}
 		return nil, nil, errors.Errorf("service %q method %q not found by reflect server", serviceName, methodName)
 	}
